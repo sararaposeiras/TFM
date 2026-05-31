@@ -1,0 +1,831 @@
+---
+title: "Simulación escenario 3, modelo correctamente especificado, n=10"
+author: "Sara Raposeiras Mariño"
+date: "Mayo 2026"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width = 14, fig.height = 10, out.width = "100%")
+```
+
+
+```{r }
+################################################################################
+#        SIMULACION + MUESTREO + AJUSTE INLA (VERSION MONTECARLO)
+#-------------------------------------------------------------------------------
+# Simulación: escenario 3 (simulacion completa)
+#-------------------------------------------------------------------------------
+# Especificación del modelo: efecto espacial asociado a covariable + residual
+#-------------------------------------------------------------------------------
+# Tamaño muestral n=10
+################################################################################
+
+# ------------------------------------------------------------------------------
+# ----------------------------    PRELIMINARES    ------------------------------
+# ------------------------------------------------------------------------------
+# Librerias necesarias:
+library(fields)
+library(INLA)
+library(ggplot2)
+library(patchwork)
+
+# Semilla para reproducibilidad:
+set.seed(1423)  
+
+# Funciones para el cálculo de medidas de evaluacion:
+# RMSE:
+rmse <- function(est, true) {
+  sqrt(mean((est - true)^2, na.rm = TRUE))
+}
+# NRMSE:
+nrmse <- function(est, true) {
+  sqrt(mean((est - true)^2, na.rm = TRUE))/sd(true)
+}
+# MAE:
+mae <- function(est, true) {
+  mean(abs(est - true), na.rm = TRUE)
+}
+# Correlacion de Pearson:
+corr.p <- function(est, true) {
+  cor(est, true, method = "pearson", use = "complete.obs")
+}
+# Correlacion de Spearman:
+corr.s <- function(est, true) {
+  cor(est, true, method = "spearman", use = "complete.obs")
+}
+
+
+
+# ------------------------------------------------------------------------------
+# ----------------------------     SIMULACIÓN     ------------------------------
+# ------------------------------------------------------------------------------
+
+# -------------------------
+# 1. Dominio espacial
+# -------------------------
+# Malla de puntos:
+dims <- 101 #dimensiones
+n <- dims^2
+grid_list <- list(x = seq(0, 100, length = dims),
+                  y = seq(0, 100, length = dims))
+
+# Coordenadas:
+lon <- rep(grid_list$x, times = dims)
+lat <- rep(grid_list$y, each = dims)
+
+
+
+# --------------------------------------
+# 2. Generación de campos espaciales
+# --------------------------------------
+# Beta espacial (Matérn):
+cov_beta.real <- matern.image.cov(grid = grid_list,
+                                  theta = 10,       
+                                  smoothness = 1.2, 
+                                  setup = TRUE)
+beta.real_field <- sim.rf(cov_beta.real) * 0.5 
+beta.real_matrix <- matrix(beta.real_field, nrow = dims, ncol = dims)
+
+# Covariable X (gradiente + ruido local):
+X_det <- scale(lon + lat)           
+X_noise <- rnorm(dims*dims, 0, 0.5) 
+X_matrix <- matrix(X_det + X_noise, nrow = dims, ncol = dims)
+
+# Efecto combinado beta*X:
+eta.real_matrix <- beta.real_matrix * X_matrix
+
+# Campo espacial residual (Matérn):
+cov_error <- matern.image.cov(grid = grid_list,
+                              theta = 15,
+                              smoothness = 0.8,
+                              setup = TRUE)
+error_field <- sim.rf(cov_error)
+error_matrix <- matrix(error_field, nrow = dims, ncol = dims)
+
+# Recalibrar beta para equilibrar varianzas:
+var_eta <- var(as.vector(eta.real_matrix))
+var_error <- var(as.vector(error_matrix))
+factor_beta.real <- sqrt(var_error / var_eta)
+beta.real_matrix <- beta.real_matrix * factor_beta.real
+eta.real_matrix <- beta.real_matrix * X_matrix
+
+# Comprobación de varianza y rango:
+cat("Varianza beta*X:", var(as.vector(eta.real_matrix)), "\n")
+cat("Varianza error:", var(as.vector(error_matrix)), "\n")
+cat("Rango beta*X:", range(eta.real_matrix), "\n")
+cat("Rango error:", range(error_matrix), "\n")
+
+# Error iid pequeño:
+sigma_iid <- 0.3
+error_iid <- matrix(rnorm(dims*dims, 0, sigma_iid), nrow = dims, ncol = dims)
+
+# Respuesta final:
+y_matrix <- eta.real_matrix + error_matrix + error_iid
+
+
+
+#---------------------------------------------------
+# 3. Plots para inspección visual
+# --------------------------------------------------
+# Paletas de colores:
+cols_main <- hcl.colors(100, "Spectral", rev = TRUE)
+cols_err <- colorRampPalette(c("blue2", "white", "red2"))(100)
+
+# Dataframes con los valores de cada componente:
+df_error <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_error$value <- as.vector(error_matrix)
+
+df_X <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_X$value <- as.vector(X_matrix)
+
+df_beta <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_beta$value <- as.vector(beta.real_matrix)
+
+df_eta <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_eta$value <- as.vector(eta.real_matrix)
+
+df_y <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_y$value <- as.vector(y_matrix)
+
+# Efecto espacial residual:
+p1 <- ggplot(df_error, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main) +
+  labs(title = expression("Efecto espacial residual " ~ alpha(s)), x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+# Covariable:
+p2 <- ggplot(df_X, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main) +
+  labs(title = expression("Covariable " ~ X), x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+# Coeficiente espacial beta:
+p3 <- ggplot(df_beta, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main) +
+  labs(title = expression(atop(
+"Coeficiente espacialmente", "variable" ~ beta(s))), x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+# Efecto combinado beta * covariable:
+p4 <- ggplot(df_eta, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main) +
+  labs(title = expression(atop("Efecto espacial asociado a",  "la covariable" ~
+                               eta(s) == beta(s) %.% X)),
+       x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+# Respuesta:
+p5 <- ggplot(df_y, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main) +
+  labs(title = expression(atop("Respuesta", y(s) == alpha(s) + beta(s) %.% X)),
+       x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p1 + p2 + 
+p4 + p3 + 
+p5 + plot_spacer() +
+  plot_layout(ncol = 2, byrow = TRUE)
+
+
+
+
+
+# ------------------------------------------------------------------------------
+# -----------------------------  MUESTREO + INLA  ------------------------------
+# ------------------------------------------------------------------------------
+n_reps <- 100    # replicas montecarlo
+n_samples <- 10      # número de puntos muestreados
+
+# Matrices para guardar predicciones completas de cada repetición:
+y_hat_matrix <- matrix(NA, nrow = n, ncol = n_reps)
+alpha_hat_matrix <- matrix(NA, nrow = n, ncol = n_reps)
+beta.real_hat_matrix <- matrix(NA, nrow = n, ncol = n_reps)
+
+# Vectores para guardar medidas resumen:
+dic_vec <- rep(NA, n_reps)
+waic_vec <- rep(NA, n_reps)
+
+rmse_y_vec <- rep(NA, n_reps)
+nrmse_y_vec <- rep(NA, n_reps)
+mae_y_vec <- rep(NA, n_reps)
+corr.s_y_vec <- rep(NA, n_reps)
+corr.p_y_vec <- rep(NA, n_reps)
+
+rmse_alpha_vec <- rep(NA, n_reps)
+nrmse_alpha_vec <- rep(NA, n_reps)
+mae_alpha_vec <- rep(NA, n_reps)
+corr.s_alpha_vec <- rep(NA, n_reps)
+corr.p_alpha_vec <- rep(NA, n_reps)
+
+rmse_beta_vec <- rep(NA, n_reps)
+nrmse_beta_vec <- rep(NA, n_reps)
+mae_beta_vec <- rep(NA, n_reps)
+corr.s_beta_vec <- rep(NA, n_reps)
+corr.p_beta_vec <- rep(NA, n_reps)
+
+rmse_eta_vec <- rep(NA, n_reps)
+nrmse_eta_vec <- rep(NA, n_reps)
+mae_eta_vec <- rep(NA, n_reps)
+corr.s_eta_vec <- rep(NA, n_reps)
+corr.p_eta_vec <- rep(NA, n_reps)
+
+
+### BUCLE MONTECARLO ####################################################
+for (i in 1:n_reps) {
+  
+  #cat("Repeticion", i, "de", n_reps, "\n") 
+  
+  set.seed(1000 + i) #semilla
+  
+  # ---------------------------------------------------
+  # MUESTREO
+  # ---------------------------------------------------
+  # Muestreo aleatorio:
+  sample_aleatorio <- sample(1:n, n_samples, replace = FALSE)
+  
+  # Dataframe con la informacion de las observaciones muestreadas:
+  dat <- data.frame(
+    intercept = 1,
+    id = sample_aleatorio,
+    lon = lon[sample_aleatorio],
+    lat = lat[sample_aleatorio],
+    Cov = X_matrix[sample_aleatorio],
+    beta.real = beta.real_matrix[sample_aleatorio],
+    eta = eta.real_matrix[sample_aleatorio],
+    space = error_matrix[sample_aleatorio],
+    resp = y_matrix[sample_aleatorio]
+  )
+  
+  # ---------------------------------------------------
+  # AJUSTE INLA
+  # ---------------------------------------------------
+  Loc <- as.matrix(dat[, c("lon", "lat")]) # Localizaciones
+  
+  mesh <- inla.mesh.2d(Loc, max.edge = c(5, 12), cutoff = 0.5) # Malla
+  
+  # SPDE para el campo espacial aditivo:
+  spde.alpha <- inla.spde2.pcmatern(
+    mesh = mesh,
+    prior.range = c(15, 0.05),
+    prior.sigma = c(sd(error_matrix), 0.05)
+  )
+  
+  # SPDE para el coeficiente espacial:
+  spde.beta <- inla.spde2.pcmatern(
+    mesh = mesh,
+    prior.range = c(10, 0.05),
+    prior.sigma = c(sd(beta.real_matrix), 0.05)
+  )
+  
+  # Índices espaciales:
+  alpha.index <- inla.spde.make.index("alpha", n.spde = spde.alpha$n.spde)
+  beta.index <- inla.spde.make.index("beta", n.spde = spde.beta$n.spde)
+  
+  # Matrices proyectoras (A):
+  A.alpha <- inla.spde.make.A(mesh = mesh, loc = Loc)
+  A.beta <- inla.spde.make.A(mesh = mesh, loc = Loc, weights = dat$Cov)
+  
+  # Stack:
+  stack <- inla.stack(
+    data = list(y = dat$resp), 
+    effects = list(data.frame(
+      intercept = dat$intercept),
+      alpha = alpha.index,
+      beta = beta.index
+    ),
+    A = list(1, A.alpha, A.beta),
+    tag = "est"
+  )
+  
+  # Fórmula: intercepto + alpha(s) + beta(s) * Cov
+  formula <- y ~ -1  + intercept + f(alpha, model = spde.alpha) + f(beta, model = spde.beta)
+  
+  # Ajuste:
+  model <- inla(formula, family = "gaussian", data = inla.stack.data(stack),
+                control.predictor = list(A = inla.stack.A(stack), compute = TRUE), 
+                control.compute = list(dic = TRUE, waic = TRUE),
+                control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+                verbose = FALSE)
+  
+  # ---------------------------------------------------
+  # PREDICCION EN TODA LA MALLA
+  # ---------------------------------------------------
+  # Dataframe para la predicción:
+  pred <- data.frame(
+    lon = lon,
+    lat = lat,
+    Cov = as.vector(X_matrix),
+    intercept = 1
+  )
+  
+  Loc.pred <- as.matrix(pred[, c("lon", "lat")])  # Localizaciones prediccion
+  
+  # Matrices proyectoras para la prediccion:
+  A.alpha.pred <- inla.spde.make.A(mesh = mesh, loc = Loc.pred)
+  A.beta.pred <- inla.spde.make.A(mesh = mesh, loc = Loc.pred, weights = pred$Cov)
+  
+  # Stack para la prediccion:
+  stack.pred <- inla.stack(
+    data = list(y = NA),
+    effects = list(
+      data.frame(intercept = pred$intercept),
+      alpha = alpha.index,
+      beta = beta.index
+    ),
+    A = list(1, A.alpha.pred, A.beta.pred),
+    tag = "pred"
+  )
+  
+  # Stack conjunto: ajuste + predicción:
+  stack.full <- inla.stack(stack, stack.pred)
+  
+  # Reajuste del modelo con el stack conjunto:
+  model.pred <- inla(formula, family = "gaussian", data = inla.stack.data(stack.full),
+                     control.predictor = list(A = inla.stack.A(stack.full), compute = TRUE),
+                     control.compute = list(dic = TRUE, waic = TRUE),
+                     control.inla = list(strategy = "adaptive", int.strategy = "eb"),
+                     verbose = FALSE)
+  
+  # ---------------------------------------------------
+  # EXTRAER PREDICCIONES
+  # ---------------------------------------------------
+  alpha.mean <- model.pred$summary.random$alpha$mean
+  beta.mean <- model.pred$summary.random$beta$mean
+  
+  # Alpha:
+  alpha.pred <- as.vector(A.alpha.pred %*% alpha.mean)
+  alpha.pred.mat <- matrix(alpha.pred, nrow = dims, ncol = dims)
+  
+  # Beta:
+  # Efecto multiplicado: beta(s) * X(s)
+  beta.cov.pred <- as.vector(A.beta.pred %*% beta.mean)
+  beta.cov.pred.mat <- matrix(beta.cov.pred, nrow = dims, ncol = dims)
+  # beta(s) sin multiplicar por X
+  A.beta.pred.raw <- inla.spde.make.A(mesh = mesh, loc = Loc.pred)
+  beta.pred <- as.vector(A.beta.pred.raw %*% beta.mean)
+  beta.pred.mat <- matrix(beta.pred, nrow = dims, ncol = dims)
+  
+  # Respuesta:
+  beta0_hat <- model.pred$summary.fixed["intercept", "mean"]
+  y_hat <- beta0_hat + alpha.pred + beta.cov.pred
+  y_hat.mat <- matrix(y_hat, nrow = dims, ncol = dims)
+  
+  # ---------------------------------------------------
+  # GUARDAR PREDICCIONES
+  # ---------------------------------------------------
+  y_hat_matrix[, i] <- y_hat
+  alpha_hat_matrix[, i] <- alpha.pred
+  beta.real_hat_matrix[, i] <- beta.pred
+  
+  # ---------------------------------------------------
+  # GUARDAR MEDIDAS
+  # ---------------------------------------------------
+  rmse_y_vec[i] <- rmse(y_hat.mat, y_matrix)
+  nrmse_y_vec[i] <- nrmse(y_hat.mat, y_matrix)
+  mae_y_vec[i]  <- mae(y_hat.mat, y_matrix)
+  corr.s_y_vec[i] <- corr.s(y_hat, as.numeric(y_matrix))
+  corr.p_y_vec[i] <- corr.p(y_hat, as.numeric(y_matrix))
+  
+  rmse_alpha_vec[i] <- rmse(alpha.pred.mat, error_matrix)
+  nrmse_alpha_vec[i] <- nrmse(alpha.pred.mat, error_matrix)
+  mae_alpha_vec[i]  <- mae(alpha.pred.mat, error_matrix)
+  corr.s_alpha_vec[i] <- corr.s(alpha.pred, as.numeric(error_matrix))
+  corr.p_alpha_vec[i] <- corr.p(alpha.pred, as.numeric(error_matrix))
+  
+  rmse_beta_vec[i] <- rmse(beta.pred.mat, beta.real_matrix)
+  nrmse_beta_vec[i] <- nrmse(beta.pred.mat, beta.real_matrix)
+  mae_beta_vec[i]  <- mae(beta.pred.mat, beta.real_matrix)
+  corr.s_beta_vec[i] <- corr.s(beta.pred, as.numeric(beta.real_matrix))
+  corr.p_beta_vec[i] <- corr.p(beta.pred, as.numeric(beta.real_matrix))
+  
+  rmse_eta_vec[i] <- rmse(beta.cov.pred.mat, eta.real_matrix)
+  nrmse_eta_vec[i] <- nrmse(beta.cov.pred.mat, eta.real_matrix)
+  mae_eta_vec[i] <- mae(beta.cov.pred.mat, eta.real_matrix)
+  corr.s_eta_vec[i] <- corr.s(beta.cov.pred, as.numeric(eta.real_matrix))
+  corr.p_eta_vec[i] <- corr.p(beta.cov.pred, as.numeric(eta.real_matrix))
+  
+  dic_vec[i]  <- model$dic$dic
+  waic_vec[i] <- model$waic$waic
+}
+### FIN BUCLE MONTECARLO #################################################
+
+
+
+
+
+#-------------------------------------------------------------------------------
+#------------------------- ANÁLISIS DE LOS RESULTADOS --------------------------
+#-------------------------------------------------------------------------------
+
+#---------------------------------------------------
+# Resumen numérico medidas de error
+#---------------------------------------------------
+# RSME:
+cat("\nRMSE alpha\n")
+print(mean(rmse_alpha_vec, na.rm = TRUE))
+print(sd(rmse_alpha_vec, na.rm = TRUE))
+print(quantile(rmse_alpha_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nRMSE beta\n")
+print(mean(rmse_beta_vec, na.rm = TRUE))
+print(sd(rmse_beta_vec, na.rm = TRUE))
+print(quantile(rmse_beta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nRMSE eta\n")
+print(mean(rmse_eta_vec, na.rm = TRUE))
+print(sd(rmse_eta_vec, na.rm = TRUE))
+print(quantile(rmse_eta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nRMSE y\n")
+print(mean(rmse_y_vec, na.rm = TRUE))
+print(sd(rmse_y_vec, na.rm = TRUE))
+print(quantile(rmse_y_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+# NRSME:
+cat("\nNRMSE alpha\n")
+print(mean(nrmse_alpha_vec, na.rm = TRUE))
+print(sd(nrmse_alpha_vec, na.rm = TRUE))
+print(quantile(nrmse_alpha_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nNRMSE beta\n")
+print(mean(nrmse_beta_vec, na.rm = TRUE))
+print(sd(nrmse_beta_vec, na.rm = TRUE))
+print(quantile(nrmse_beta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nNRMSE eta\n")
+print(mean(nrmse_eta_vec, na.rm = TRUE))
+print(sd(nrmse_eta_vec, na.rm = TRUE))
+print(quantile(nrmse_eta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nNRMSE y\n")
+print(mean(nrmse_y_vec, na.rm = TRUE))
+print(sd(nrmse_y_vec, na.rm = TRUE))
+print(quantile(nrmse_y_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+# MAE:
+cat("\nMAE alpha\n")
+print(mean(mae_alpha_vec, na.rm = TRUE))
+print(sd(mae_alpha_vec, na.rm = TRUE))
+print(quantile(mae_alpha_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nMAE beta\n")
+print(mean(mae_beta_vec, na.rm = TRUE))
+print(sd(mae_beta_vec, na.rm = TRUE))
+print(quantile(mae_beta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nMAE eta\n")
+print(mean(mae_eta_vec, na.rm = TRUE))
+print(sd(mae_eta_vec, na.rm = TRUE))
+print(quantile(mae_eta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nMAE y\n")
+print(mean(mae_y_vec, na.rm = TRUE))
+print(sd(mae_y_vec, na.rm = TRUE))
+print(quantile(mae_y_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+# CORRELACION PEARSON:
+cat("\nCORR.P alpha\n")
+print(mean(corr.p_alpha_vec, na.rm = TRUE))
+print(sd(corr.p_alpha_vec, na.rm = TRUE))
+print(quantile(corr.p_alpha_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nCORR.P beta\n")
+print(mean(corr.p_beta_vec, na.rm = TRUE))
+print(sd(corr.p_beta_vec, na.rm = TRUE))
+print(quantile(corr.p_beta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nCORR.P eta\n")
+print(mean(corr.p_eta_vec, na.rm = TRUE))
+print(sd(corr.p_eta_vec, na.rm = TRUE))
+print(quantile(corr.p_eta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nCORR.P y\n")
+print(mean(corr.p_y_vec, na.rm = TRUE))
+print(sd(corr.p_y_vec, na.rm = TRUE))
+print(quantile(corr.p_y_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+# CORRELACION SPEARMAN:
+cat("\nCORR.S alpha\n")
+print(mean(corr.s_alpha_vec, na.rm = TRUE))
+print(sd(corr.s_alpha_vec, na.rm = TRUE))
+print(quantile(corr.s_alpha_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nCORR.S beta\n")
+print(mean(corr.s_beta_vec, na.rm = TRUE))
+print(sd(corr.s_beta_vec, na.rm = TRUE))
+print(quantile(corr.s_beta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nCORR.S eta\n")
+print(mean(corr.s_eta_vec, na.rm = TRUE))
+print(sd(corr.s_eta_vec, na.rm = TRUE))
+print(quantile(corr.s_eta_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nCORR.S y\n")
+print(mean(corr.s_y_vec, na.rm = TRUE))
+print(sd(corr.s_y_vec, na.rm = TRUE))
+print(quantile(corr.s_y_vec, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+
+# MEDIDAS AJUSTE GLOBAL DEL MODELO
+cat("\nDIC ajuste\n")
+print(mean(dic_vec, na.rm = TRUE))
+print(sd(dic_vec, na.rm = TRUE))
+
+cat("\nWAIC ajuste\n")
+print(mean(waic_vec, na.rm = TRUE))
+print(sd(waic_vec, na.rm = TRUE))
+
+
+#---------------------------------------------------
+# Resumen gráfico medidas de error
+#---------------------------------------------------
+# RMSE:
+par(mfrow = c(2, 4))
+hist(rmse_y_vec, main = "RMSE respuesta", xlab = "RMSE")
+hist(rmse_alpha_vec, main = "RMSE alpha", xlab = "RMSE")
+hist(rmse_beta_vec, main = "RMSE beta", xlab = "RMSE")
+hist(rmse_eta_vec, main = "RMSE eta", xlab = "RMSE")
+boxplot(rmse_y_vec, main = "RMSE respuesta")
+boxplot(rmse_alpha_vec, main = "RMSE alpha")
+boxplot(rmse_beta_vec, main = "RMSE beta")
+boxplot(rmse_eta_vec, main = "RMSE eta")
+
+# NRMSE:
+hist(nrmse_y_vec, main = "NRMSE respuesta", xlab = "NRMSE")
+hist(nrmse_alpha_vec, main = "NRMSE alpha", xlab = "NRMSE")
+hist(nrmse_beta_vec, main = "NRMSE beta", xlab = "NRMSE")
+hist(nrmse_eta_vec, main = "NRMSE eta", xlab = "NRMSE")
+boxplot(nrmse_y_vec, main = "NRMSE respuesta")
+boxplot(nrmse_alpha_vec, main = "NRMSE alpha")
+boxplot(nrmse_beta_vec, main = "NRMSE beta")
+boxplot(nrmse_eta_vec, main = "NRMSE eta")
+
+# MAE:
+hist(mae_y_vec, main = "MAE respuesta", xlab = "MAE")
+hist(mae_alpha_vec, main = "MAE alpha", xlab = "MAE")
+hist(mae_beta_vec, main = "MAE beta", xlab = "MAE")
+hist(mae_eta_vec, main = "MAE eta", xlab = "MAE")
+boxplot(mae_y_vec, main = "MAE respuesta")
+boxplot(mae_alpha_vec, main = "MAE alpha")
+boxplot(mae_beta_vec, main = "MAE beta")
+boxplot(mae_eta_vec, main = "MAE eta")
+
+# CORRELACION PEARSON:
+hist(corr.p_y_vec, main = "CORR.P respuesta", xlab = "CORR.P")
+hist(corr.p_alpha_vec, main = "CORR.P alpha", xlab = "CORR.P")
+hist(corr.p_beta_vec, main = "CORR.P beta", xlab = "CORR.P")
+hist(corr.p_eta_vec, main = "CORR.P eta", xlab = "CORR.P")
+boxplot(corr.p_y_vec, main = "CORR.P respuesta")
+boxplot(corr.p_alpha_vec, main = "CORR.P alpha")
+boxplot(corr.p_beta_vec, main = "CORR.P beta")
+boxplot(corr.p_eta_vec, main = "CORR.P eta")
+
+# CORRELACION SPEARMAN:
+hist(corr.s_y_vec, main = "CORR.S respuesta", xlab = "CORR.S")
+hist(corr.s_alpha_vec, main = "CORR.S alpha", xlab = "CORR.S")
+hist(corr.s_beta_vec, main = "CORR.S beta", xlab = "CORR.S")
+hist(corr.s_eta_vec, main = "CORR.S eta", xlab = "CORR.S")
+boxplot(corr.s_y_vec, main = "CORR.S respuesta")
+boxplot(corr.s_alpha_vec, main = "CORR.S alpha")
+boxplot(corr.s_beta_vec, main = "CORR.S beta")
+boxplot(corr.s_eta_vec, main = "CORR.S eta")
+
+# MEDIDAS AJUSTE GLOBAL DEL MODELO
+par(mfrow = c(2, 2))
+hist(dic_vec, main = "DIC ajuste", xlab = "DIC")
+hist(waic_vec, main = "WAIC ajuste", xlab = "WAIC")
+boxplot(dic_vec, main = "DIC ajuste")
+boxplot(waic_vec, main = "WAIC ajuste")
+par(mfrow = c(1, 1))
+
+
+#---------------------------------------------------
+# Resumen numérico estimaciones
+# --------------------------------------------------
+y_hat_mean <- rowMeans(y_hat_matrix, na.rm = TRUE)
+y_hat_mean.mat <- matrix(y_hat_mean, nrow=101)
+alpha_hat_mean <- rowMeans(alpha_hat_matrix, na.rm = TRUE)
+alpha_hat_mean.mat <- matrix(alpha_hat_mean, nrow=101)
+beta_hat_mean <- rowMeans(beta.real_hat_matrix, na.rm = TRUE)
+beta_hat_mean.mat <- matrix(beta_hat_mean, nrow=101)
+
+y_hat_sd <- apply(y_hat_matrix, 1, sd, na.rm = TRUE)
+alpha_hat_sd <- apply(alpha_hat_matrix, 1, sd, na.rm = TRUE)
+beta_hat_sd <- apply(beta.real_hat_matrix, 1, sd, na.rm = TRUE)
+
+cat("\nRespuesta: media\n")
+print(mean(y_hat_mean, na.rm = TRUE))
+print(sd(y_hat_mean, na.rm = TRUE))
+print(quantile(y_hat_mean, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nRespuesta: sd\n")
+print(mean(y_hat_sd, na.rm = TRUE))
+print(sd(y_hat_sd, na.rm = TRUE))
+print(quantile(y_hat_sd, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nRespuesta: error\n")
+print(mean(y_hat_mean.mat-y_matrix, na.rm = TRUE))
+print(sd(y_hat_mean.mat-y_matrix, na.rm = TRUE))
+print(quantile(y_hat_mean.mat-y_matrix, probs = c(0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99), na.rm = TRUE))
+
+cat("\nalpha: media\n")
+print(mean(alpha_hat_mean, na.rm = TRUE))
+print(sd(alpha_hat_mean, na.rm = TRUE))
+print(quantile(alpha_hat_mean, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nalpha: sd\n")
+print(mean(alpha_hat_sd, na.rm = TRUE))
+print(sd(alpha_hat_sd, na.rm = TRUE))
+print(quantile(alpha_hat_sd, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nalpha: error\n")
+print(mean(alpha_hat_mean.mat-error_matrix, na.rm = TRUE))
+print(sd(alpha_hat_mean.mat-error_matrix, na.rm = TRUE))
+print(quantile(alpha_hat_mean.mat-error_matrix, probs = c(0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99), na.rm = TRUE))
+
+cat("\nbeta: media\n")
+print(mean(beta_hat_mean, na.rm = TRUE))
+print(sd(beta_hat_mean, na.rm = TRUE))
+print(quantile(beta_hat_mean, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nbeta: sd\n")
+print(mean(beta_hat_sd, na.rm = TRUE))
+print(sd(beta_hat_sd, na.rm = TRUE))
+print(quantile(beta_hat_sd, probs = c(0.05, 0.5, 0.95), na.rm = TRUE))
+
+cat("\nbeta: error\n")
+print(mean(beta_hat_mean.mat-beta.real_matrix, na.rm = TRUE))
+print(sd(beta_hat_mean.mat-beta.real_matrix, na.rm = TRUE))
+print(quantile(beta_hat_mean.mat-beta.real_matrix, probs = c(0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99), na.rm = TRUE))
+
+
+#---------------------------------------------------
+# Resumen gráfico estimaciones
+# --------------------------------------------------
+# Campo espacial residual:
+zlim_alpha <- range(c(alpha_hat_mean.mat, error_matrix), na.rm = TRUE)
+lim_err_alpha <- max(abs(alpha_hat_mean.mat - error_matrix), na.rm = TRUE)
+
+df_alpha_hat <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_alpha_hat$value <- as.vector(alpha_hat_mean.mat)
+
+df_alpha_real <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_alpha_real$value <- as.vector(error_matrix)
+
+p1 <- ggplot(df_alpha_hat, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_alpha) +
+  labs(title = "Estimación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p2 <- ggplot(df_alpha_real, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_alpha) +
+  labs(title = "Simulación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p1 + p2 +
+  plot_annotation(title = expression(alpha(s))) &
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# Coeficiente beta:
+zlim_beta <- range(c(beta_hat_mean.mat, beta.real_matrix), na.rm = TRUE)
+lim_err_beta <- max(abs(beta_hat_mean.mat - beta.real_matrix), na.rm = TRUE)
+
+df_beta_hat <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_beta_hat$value <- as.vector(beta_hat_mean.mat)
+
+df_beta_real <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_beta_real$value <- as.vector(beta.real_matrix)
+
+p1 <- ggplot(df_beta_hat, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_beta) +
+  labs(title = "Estimación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p2 <- ggplot(df_beta_real, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_beta) +
+  labs(title = "Simulación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p1 + p2 +
+  plot_annotation(title = expression(beta(s))) &
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# Efecto beta * covariable:
+zlim_beta <- range(c(beta_hat_mean.mat * X_matrix, eta.real_matrix), na.rm = TRUE)
+lim_err_beta <- max(abs(beta_hat_mean.mat * X_matrix - eta.real_matrix), na.rm = TRUE)
+
+df_eta_hat <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_eta_hat$value <- as.vector(beta_hat_mean.mat * X_matrix)
+
+df_eta_real <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_eta_real$value <- as.vector(eta.real_matrix)
+
+p1 <- ggplot(df_eta_hat, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_beta) +
+  labs(title = "Estimación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p2 <- ggplot(df_eta_real, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_beta) +
+  labs(title = "Simulación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p1 + p2 + 
+  plot_annotation(title = expression(eta(s) == beta(s) %.% X(s))) &
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+
+
+# Respuesta:
+zlim_y <- range(c(y_hat_mean.mat, y_matrix), na.rm = TRUE)
+lim_err_y <- max(abs(y_hat_mean.mat - y_matrix), na.rm = TRUE)
+
+df_y_hat <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_y_hat$value <- as.vector(y_hat_mean.mat)
+
+df_y_real <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_y_real$value <- as.vector(y_matrix)
+
+df_y_err <- expand.grid(x = grid_list$x, y = grid_list$y)
+df_y_err$value <- as.vector(y_hat_mean.mat - y_matrix)
+
+p1 <- ggplot(df_y_hat, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_y) +
+  labs(title = "Estimación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p2 <- ggplot(df_y_real, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_main, limits = zlim_y) +
+  labs(title = "Simulación", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p3 <- ggplot(df_y_err, aes(x, y, fill = value)) +
+  geom_raster() +
+  coord_fixed(ratio = 0.65) +
+  scale_fill_gradientn(colours = cols_err,
+                       limits = c(-lim_err_y, lim_err_y)) +
+  labs(title = "Error de predicción", x = "X", y = "Y", fill = "") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank())
+
+p1 + p2 + p3 +
+  plot_annotation(title = expression(y(s))) &
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+```
